@@ -1,0 +1,86 @@
+# NOWA Backend
+
+Real-time AI planner backend built with Django.
+
+## Quick Start
+
+### 1. Install Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Configure Environment
+```bash
+cp .env.example .env
+# Edit .env with your API keys
+```
+
+### 3. Run Migrations
+```bash
+python manage.py migrate
+python manage.py createsuperuser
+```
+
+### 4. Start Server
+```bash
+# Terminal 1: Django
+python manage.py runserver
+
+# Terminal 2: Celery (Windows)
+celery -A nowa_backend worker -l info --pool=solo
+```
+
+### 5. Test API
+```
+http://localhost:8000/health/
+http://localhost:8000/admin/
+http://localhost:8000/api/
+```
+
+## API Endpoints
+
+- `POST /api/plans/generate/` - Generate new plan
+- `GET /api/plans/{id}/` - Get plan details
+- `POST /api/plans/{id}/start/` - Activate plan
+- `POST /api/plans/{id}/swap-stop/` - Swap a stop
+- `POST /api/plans/{id}/delay/` - Delay replanning
+- `POST /api/plans/{id}/pause/` - Pause plan
+- `POST /api/plans/{id}/resume/` - Resume plan
+- `POST /api/feedback/` - Submit feedback
+
+## Required API Keys
+
+- `GOOGLE_PLACES_API_KEY`
+- `GOOGLE_DIRECTIONS_API_KEY`
+- `OPENWEATHER_API_KEY`
+- `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`
+
+Get them from:
+- Google: https://console.cloud.google.com/
+- OpenWeather: https://openweathermap.org/api
+- OpenAI: https://platform.openai.com/api-keys
+- Anthropic: https://console.anthropic.com/
+
+## Development
+```bash
+# Create migrations
+python manage.py makemigrations
+
+# Apply migrations
+python manage.py migrate
+
+# Create superuser
+python manage.py createsuperuser
+
+# Run tests
+python manage.py test
+```
+
+## Production
+
+Use Docker:
+```bash
+docker-compose up -d
+```
+
+Or deploy to Render/Fly.io/Heroku.

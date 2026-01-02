@@ -1,0 +1,38 @@
+# Python
+*.py[cod]
+__pycache__/
+*.so
+.Python
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Django
+*.sqlite3
+db.sqlite3
+*.log
+staticfiles/
+media/
+logs/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Celery
+celerybeat-schedule
+celerybeat.pid

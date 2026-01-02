@@ -1,0 +1,30 @@
+Phase 2
+
+ Real-time updates via WebSockets/SSE
+ Uber price estimates per leg
+ Multi-day trip planning
+ Collaborative planning (share with friends)
+
+Phase 3
+
+ Machine learning for personalization
+ Historical pattern analysis
+ Predictive fatigue modeling
+ Custom POI categories
+
+
+ Features Opcionales (Pendientes) 🟡
+Tenemos el código pero no integrado:
+
+Analytics tracking (PostHog) - archivo creado pero no conectado
+Weather auto-adjustments - lógica lista pero no aplicada
+Fatigue auto-adjustments - código listo pero no en tasks
+Undo swap - endpoint falta conectar
+Profile learning from feedback - parcial
+
+Infraestructura (Opcional) 🟡
+
+Docker Compose completo
+Tests unitarios
+CI/CD
+Documentación de deployment
