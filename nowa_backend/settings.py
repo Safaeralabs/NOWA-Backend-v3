@@ -300,7 +300,7 @@ if not DEBUG:
     
     missing_keys = [key for key, value in critical_keys.items() if not value]
     if missing_keys:
-        raise ValueError(f"❌ Missing critical API keys in production: {', '.join(missing_keys)}")
+        raise ValueError(f"  Missing critical API keys in production: {', '.join(missing_keys)}")
 
 
 # ==========================================

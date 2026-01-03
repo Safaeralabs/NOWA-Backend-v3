@@ -2,35 +2,23 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, conlist, constr
-from typing import Tuple
 from django.core.cache import cache
-# OpenAI SDK (official)
-# pip install openai
-# from openai import OpenAI
-# We'll import lazily to avoid hard dependency if you run without LLM.
+import logging
+
+logger = logging.getLogger(__name__)
 
 WHY_MAX = 50
-
-
 CITY_DNA_TTL_SECONDS = 30 * 24 * 60 * 60  # 30 días
 
 
 class CityDNA(BaseModel):
     city: str
     language: str = "es"
-
-    # “Lo típico” por ciudad (estable)
     food_typicals: List[Dict[str, Any]] = Field(default_factory=list)
     drink_typicals: List[Dict[str, Any]] = Field(default_factory=list)
-
-    # Keywords para mejorar queries Places sin inventar lugares
     local_keywords: List[str] = Field(default_factory=list)
     negative_keywords: List[str] = Field(default_factory=list)
-
-    # Etiqueta / costumbres
     etiquette: List[str] = Field(default_factory=list)
-
-    # “barrio/zonas” opcional (si el LLM lo sabe)
     neighborhood_hints: List[Dict[str, Any]] = Field(default_factory=list)
 
 
@@ -38,14 +26,8 @@ class LocalGuide(BaseModel):
     headline: str
     summary: str
     climate_advice: List[str] = Field(default_factory=list)
-
-    # Lo típico, por ciudad (qué comer / beber)
     local_typicals: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
-
-    # Consejos por slot (qué pedir, cómo ordenar, qué buscar en menú)
     per_slot_order_tips: List[Dict[str, Any]] = Field(default_factory=list)
-
-    # Notas prácticas / seguridad alimentaria suave (sin alarmismo)
     practical_notes: List[str] = Field(default_factory=list)
 
 
@@ -67,9 +49,9 @@ class SlotsFill(BaseModel):
 
 class SlotLLM:
     """
-    LLM is OPTIONAL.
-    - If client is None -> deterministic fallback
-    - If client exists -> soft selection + better copy, structured output
+    LLM with robust fallbacks:
+    - If client exists: use LLM for better copy
+    - If client None or fails: deterministic fallback
     """
 
     def __init__(self, client: Optional[Any] = None, model: str = "gpt-4o-mini"):
@@ -77,13 +59,14 @@ class SlotLLM:
         self.model = model
 
     def fill(self, *, context: Dict[str, Any], ranked_slots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Fill slots with selections + why_now"""
         if not self.client:
             return self._deterministic_fallback(context, ranked_slots)
 
         try:
             return self._llm_fill(context, ranked_slots)
-        except Exception:
-            # Never break the plan because LLM failed
+        except Exception as e:
+            logger.warning(f"LLM fill failed: {e}, using fallback")
             return self._deterministic_fallback(context, ranked_slots)
 
     def _deterministic_fallback(self, context: Dict[str, Any], ranked_slots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -99,7 +82,7 @@ class SlotLLM:
         return out
 
     def _llm_fill(self, context: Dict[str, Any], ranked_slots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        # Build a compact input so cost stays low and it can't hallucinate new places.
+        """Use LLM for soft picks + better why_now copy"""
         compact_slots = []
         for slot in ranked_slots:
             opts = []
@@ -138,37 +121,40 @@ class SlotLLM:
             "slots": compact_slots,
         }
 
-        # Structured Outputs via Responses API parse (Pydantic)
-        # See OpenAI docs: responses.parse + Pydantic schema :contentReference[oaicite:3]{index=3}
-        from openai import OpenAI  # lazy import
-
-        # self.client is expected to be OpenAI() instance
-        resp = self.client.responses.parse(
+        from openai import OpenAI
+        resp = self.client.chat.completions.create(
             model=self.model,
-            input=[
+            messages=[
                 {"role": "system", "content": sys},
                 {"role": "user", "content": str(user)},
             ],
-            text_format=SlotsFill,
+            response_format={"type": "json_object"}
         )
 
-        parsed: SlotsFill = resp.output_parsed  # provided by SDK when using parse :contentReference[oaicite:4]{index=4}
-        picks_by_slot = {p.slot_id: p for p in parsed.picks}
+        import json
+        parsed_text = resp.choices[0].message.content
+        parsed = json.loads(parsed_text)
+        picks_list = parsed.get("picks") or []
+
+        picks_by_slot = {}
+        for p_data in picks_list:
+            slot_id = p_data.get("slot_id")
+            place_id = p_data.get("selected_place_id")
+            why = p_data.get("why_now", "")[:WHY_MAX]
+            picks_by_slot[slot_id] = {"place_id": place_id, "why": why}
 
         out = []
         for slot in ranked_slots:
             p = picks_by_slot.get(slot["slot_id"])
             if not p:
-                # fallback per-slot
                 options = slot.get("options") or []
                 chosen = options[0]["place"]["place_id"] if options else None
                 why = self._simple_why_now(slot, context)
                 out.append({**slot, "selected_place_ids": [chosen] if chosen else [], "why_now": why})
                 continue
 
-            # ensure selected_place_id exists in candidates list
             valid_ids = {o["place"]["place_id"] for o in (slot.get("options") or [])}
-            if p.selected_place_id not in valid_ids:
+            if p["place_id"] not in valid_ids:
                 options = slot.get("options") or []
                 chosen = options[0]["place"]["place_id"] if options else None
                 why = self._simple_why_now(slot, context)
@@ -177,8 +163,8 @@ class SlotLLM:
 
             out.append({
                 **slot,
-                "selected_place_ids": [p.selected_place_id],
-                "why_now": (p.why_now or "")[:WHY_MAX],
+                "selected_place_ids": [p["place_id"]],
+                "why_now": p["why"],
             })
 
         return out
@@ -198,101 +184,86 @@ class SlotLLM:
             base = "Abierto a esta hora"
 
         return base[:WHY_MAX]
+
+    # ========== City DNA (con hybrid fallback) ==========
+    
     def get_city_dna(self, *, city: str, language: str = "es") -> Dict[str, Any]:
         """
-        Genera City DNA una vez y cachea 30 días.
-        Si no hay client, devuelve fallback mínimo.
+        Get City DNA with robust fallback strategy:
+        1. Check cache
+        2. Try LLM
+        3. Fall back to static data from city_fallbacks.py
         """
         key = _cache_key_city_dna(city, language)
         cached = cache.get(key)
         if cached:
+            logger.info(f"   City DNA cache HIT: {city}")
             return cached
 
-        # fallback si LLM desactivado
-        if not self.client:
-            fallback = {
-                "city": city,
-                "language": language,
-                "food_typicals": [],
-                "drink_typicals": [],
-                "local_keywords": [],
-                "negative_keywords": [],
-                "etiquette": [],
-                "neighborhood_hints": [],
-            }
-            cache.set(key, fallback, CITY_DNA_TTL_SECONDS)
-            return fallback
-
-        try:
-            dna = self._llm_build_city_dna(city=city, language=language)
-            # valida con Pydantic
-            parsed = CityDNA(**dna).model_dump()
-            cache.set(key, parsed, CITY_DNA_TTL_SECONDS)
-            return parsed
-        except Exception:
-            # si falla, cacheamos fallback corto para no reintentar sin parar
-            fallback = {
-                "city": city,
-                "language": language,
-                "food_typicals": [],
-                "drink_typicals": [],
-                "local_keywords": [],
-                "negative_keywords": [],
-                "etiquette": [],
-                "neighborhood_hints": [],
-            }
-            cache.set(key, fallback, 6 * 60 * 60)  # 6h
-            return fallback
+        # Try LLM
+        if self.client:
+            try:
+                logger.info(f"    Generating City DNA via LLM: {city}")
+                dna = self._llm_build_city_dna(city=city, language=language)
+                parsed = CityDNA(**dna).model_dump()
+                cache.set(key, parsed, CITY_DNA_TTL_SECONDS)
+                logger.info(f"   City DNA generated: {len(parsed['food_typicals'])} foods")
+                return parsed
+            except Exception as e:
+                logger.warning(f"  LLM City DNA failed for {city}: {e}")
+        
+        # Fall back to static
+        logger.info(f"    Using static fallback for City DNA: {city}")
+        from .city_fallbacks import get_city_fallback
+        fallback = get_city_fallback(city)
+        
+        # Cache fallback with shorter TTL
+        cache.set(key, fallback, 7*24*60*60)  # 7 days
+        return fallback
 
     def _llm_build_city_dna(self, *, city: str, language: str) -> Dict[str, Any]:
-        """
-        LLM produce CityDNA estructurado.
-        """
+        """LLM generates City DNA"""
         sys = (
             "You are an expert local travel guide. "
-            "Create a compact City DNA for shopping/food/nightlife that is culturally accurate. "
-            "Return STRICT JSON only, no markdown."
+            "Create a compact City DNA for food/drink/culture that is culturally accurate. "
+            "Return STRICT JSON only, no markdown. "
+            "Do NOT invent venues, only describe typical dishes/drinks."
         )
 
-        user = {
+        schema_example = {
             "city": city,
             "language": language,
-            "schema": {
-                "city": "string",
-                "language": "string",
-                "food_typicals": [
-                    {"name": "string", "note": "string", "when": ["string"], "how_to_order": "string"}
-                ],
-                "drink_typicals": [
-                    {"name": "string", "note": "string", "when": ["string"], "how_to_order": "string"}
-                ],
-                "local_keywords": ["string"],
-                "negative_keywords": ["string"],
-                "etiquette": ["string"],
-                "neighborhood_hints": [
-                    {"name": "string", "vibe": ["string"], "best_for": ["string"]}
-                ]
-            },
-            "constraints": [
-                "Avoid hallucinating specific venues.",
-                "Do not claim a dish is served at a particular place.",
-                "Focus on typical dishes/drinks and helpful keywords."
+            "food_typicals": [
+                {"name": "Dish Name", "note": "Description", "when": ["morning"], "how_to_order": "Tip"}
             ],
+            "drink_typicals": [
+                {"name": "Drink Name", "note": "Description", "when": ["evening"], "how_to_order": "Tip"}
+            ],
+            "local_keywords": ["keyword1", "keyword2"],
+            "negative_keywords": ["tourist_trap"],
+            "etiquette": ["Tip 1", "Tip 2"],
+            "neighborhood_hints": [
+                {"name": "Neighborhood", "vibe": ["cool", "local"], "best_for": ["nightlife"]}
+            ]
         }
 
-        resp = self.client.responses.create(
+        user = f"Generate City DNA for {city} in {language}. Schema: {schema_example}"
+
+        from openai import OpenAI
+        resp = self.client.chat.completions.create(
             model=self.model,
-            input=[
+            messages=[
                 {"role": "system", "content": sys},
-                {"role": "user", "content": str(user)},
+                {"role": "user", "content": user},
             ],
+            response_format={"type": "json_object"}
         )
 
-        # SDK devuelve texto en resp.output_text (según versión); hacemos parse simple:
-        text = getattr(resp, "output_text", None) or ""
-        # intenta parsear JSON
         import json
+        text = resp.choices[0].message.content
         return json.loads(text)
+
+    # ========== Local Guide (con fallback determinístico) ==========
 
     def build_local_guide(
         self,
@@ -306,50 +277,98 @@ class SlotLLM:
         language: str = "es",
     ) -> Dict[str, Any]:
         """
-        Devuelve guía tipo “local guide”:
-        - qué es típico de la ciudad (comida/bebida)
-        - qué pedir en restaurantes/bares (sin inventar menús)
-        - tips por clima/hora
+        Build local guide with robust fallback.
         """
         if not self.client:
-            # fallback determinístico básico (sin LLM)
-            return {
-                "headline": "✔️ Plan adaptado al clima",
-                "summary": "Plan construido con clima y horarios en mente.",
-                "climate_advice": [],
-                "local_typicals": {
-                    "food": city_dna.get("food_typicals", [])[:5],
-                    "drinks": city_dna.get("drink_typicals", [])[:5],
-                },
-                "per_slot_order_tips": [],
-                "practical_notes": [],
-            }
+            logger.info("  Building deterministic local guide (no LLM)")
+            return self._deterministic_guide(
+                city_dna=city_dna,
+                weather=weather,
+                constraints=constraints
+            )
+        
+        try:
+            logger.info("    Building local guide via LLM")
+            return self._llm_build_local_guide(
+                city_dna=city_dna,
+                intent=intent,
+                subtypes=subtypes,
+                weather=weather,
+                options_by_slot=options_by_slot,
+                constraints=constraints,
+                language=language
+            )
+        except Exception as e:
+            logger.warning(f"  LLM guide failed: {e}, using deterministic fallback")
+            return self._deterministic_guide(
+                city_dna=city_dna,
+                weather=weather,
+                constraints=constraints
+            )
 
-        # Compactar opciones para que el LLM NO invente lugares
+    def _deterministic_guide(
+        self,
+        city_dna: Dict[str, Any],
+        weather: Dict[str, Any],
+        constraints: List[str]
+    ) -> Dict[str, Any]:
+        """Create guide without LLM using city_dna"""
+        feels = weather.get('feels_like', weather.get('temp', 18))
+        cond = (weather.get('condition') or '').lower()
+        
+        climate_advice = []
+        if feels <= 5:
+            climate_advice.append("Hace mucho frío - busca lugares indoor")
+        elif feels >= 28:
+            climate_advice.append("Hace calor - hidrátate y busca sombra")
+        if 'rain' in cond or 'drizzle' in cond:
+            climate_advice.append("Lluvia prevista - lleva paraguas")
+        if 'snow' in cond:
+            climate_advice.append("Nieve - abrígate bien y ten cuidado al caminar")
+        
+        return {
+            "headline": "    Plan adaptado al clima actual",
+            "summary": f"Plan optimizado para {city_dna.get('city', 'la ciudad')} considerando clima y horarios.",
+            "climate_advice": climate_advice,
+            "local_typicals": {
+                "food": city_dna.get('food_typicals', [])[:5],
+                "drinks": city_dna.get('drink_typicals', [])[:5]
+            },
+            "per_slot_order_tips": [],
+            "practical_notes": city_dna.get('etiquette', [])
+        }
+
+    def _llm_build_local_guide(
+        self,
+        city_dna: Dict[str, Any],
+        intent: str,
+        subtypes: List[str],
+        weather: Dict[str, Any],
+        options_by_slot: List[Dict[str, Any]],
+        constraints: List[str],
+        language: str
+    ) -> Dict[str, Any]:
+        """LLM generates local guide"""
         compact_slots = []
         for s in options_by_slot:
             slot_id = s.get("slot_id")
             opts = []
-            for o in (s.get("options") or [])[:8]:
+            for o in (s.get("options") or [])[:5]:
                 opts.append({
                     "place_id": o.get("place_id"),
                     "name": o.get("name"),
                     "category": o.get("category"),
-                    "rating": o.get("rating"),
-                    "distance_m": o.get("distance_m"),
-                    "open": o.get("open"),
-                    "open_confidence": o.get("open_confidence"),
                 })
             compact_slots.append({"slot_id": slot_id, "options": opts})
 
         sys = (
             "You are a warm, practical local tour guide. "
             "You MUST NOT invent venues or claim a dish is served at a specific place. "
-            "You may suggest what to order ONLY as: 'If you see X on the menu, order it' or 'Ask for X'. "
+            "Suggest what to order ONLY as: 'If you see X on the menu, order it' or 'Ask for X'. "
             "Return STRICT JSON only, no markdown."
         )
 
-        user = {
+        user_content = {
             "language": language,
             "intent": intent,
             "subtypes": subtypes,
@@ -357,34 +376,20 @@ class SlotLLM:
             "weather": weather,
             "city_dna": city_dna,
             "options_by_slot": compact_slots,
-            "schema": {
-                "headline": "string",
-                "summary": "string",
-                "climate_advice": ["string"],
-                "local_typicals": {
-                    "food": [{"name": "string", "note": "string", "how_to_order": "string"}],
-                    "drinks": [{"name": "string", "note": "string", "how_to_order": "string"}]
-                },
-                "per_slot_order_tips": [
-                    {"slot_id": "string", "tips": ["string"]}
-                ],
-                "practical_notes": ["string"]
-            }
         }
 
-        resp = self.client.responses.create(
+        from openai import OpenAI
+        resp = self.client.chat.completions.create(
             model=self.model,
-            input=[
+            messages=[
                 {"role": "system", "content": sys},
-                {"role": "user", "content": str(user)},
+                {"role": "user", "content": str(user_content)},
             ],
+            response_format={"type": "json_object"}
         )
 
-        text = getattr(resp, "output_text", None) or ""
         import json
+        text = resp.choices[0].message.content
         guide = json.loads(text)
-        # validar / normalizar
         parsed = LocalGuide(**guide).model_dump()
         return parsed
-
-

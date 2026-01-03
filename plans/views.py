@@ -8,6 +8,8 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from datetime import timedelta
+
 from .models import Plan, Stop, StopFeedback, Profile, SavedPlace
 from .serializers import (
     PlanListSerializer,
@@ -26,7 +28,6 @@ from .serializers import (
 from .tasks import generate_plan_task, swap_stop_task, delay_replan_task
 
 
-
 class ProfileViewSet(viewsets.ModelViewSet):
     serializer_class = ProfileSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -40,10 +41,13 @@ class ProfileViewSet(viewsets.ModelViewSet):
 
 class PlanViewSet(viewsets.ModelViewSet):
     """
-    Endpoints (según tu urls.py):
+    V3 Plan Management
+    
+    Endpoints:
       - GET    /api/plans/
       - POST   /api/plans/generate/
       - GET    /api/plans/{id}/
+      - GET    /api/plans/{id}/presentation/  ← NEW V3
       - POST   /api/plans/{id}/swap-stop/
       - POST   /api/plans/{id}/delay/
       - POST   /api/plans/{id}/start/
@@ -72,6 +76,7 @@ class PlanViewSet(viewsets.ModelViewSet):
         return PlanDetailSerializer
 
     def retrieve(self, request, pk=None):
+        """GET /api/plans/{id}/ - Full plan details"""
         plan = self.get_object()
         serializer = PlanDetailSerializer(plan)
         return Response(serializer.data)
@@ -79,29 +84,28 @@ class PlanViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"])
     def generate(self, request):
         """
-        Generate a new plan (V3 wired)
+        POST /api/plans/generate/ - Generate new plan (V3)
 
         Required:
           - city_name
-          - lat, lng  (V3 needs real coords for Places)
+          - lat, lng
 
         Optional (V3):
-          - engine_version: v3
-          - intent: "chill" | "shopping" | "museum" ...
-          - discovery_mode: local|tourist
+          - engine_version: v3 (default)
+          - intent: "chill" | "food_tour" | "nightlife" | ...
+          - discovery_mode: local | tourist
           - constraints: ["indoor_only", "no_alcohol", ...]
           - use_llm: true/false
-          - llm_model
-          - timezone
-          - companions
-          - weather (manual override for QA)
+          - llm_model: gpt-4o-mini
+          - timezone: Europe/Berlin
+          - when_selection: now | later_today | tonight | tomorrow
         """
 
         serializer = PlanCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        # --- HARD REQUIREMENT for V3: location must be present ---
+        # V3 requires coordinates
         lat = data.get("lat")
         lng = data.get("lng")
         if lat is None or lng is None:
@@ -116,16 +120,16 @@ class PlanViewSet(viewsets.ModelViewSet):
         start_dt = data.get("start_time")
         end_dt = data.get("end_time")
 
-        # --- Build V3-first inputs_json (and keep V2 fields for compatibility) ---
+        # Build V3 inputs_json
         constraints = list(data.get("constraints") or [])
 
-        # Back-compat: if user used 'avoid', merge into constraints
+        # Back-compat: merge 'avoid' into constraints
         avoid = list(data.get("avoid") or [])
         for a in avoid:
             if a and a not in constraints:
                 constraints.append(a)
 
-        # Back-compat: indoor/outdoor toggles become constraints if strict
+        # Back-compat: indoor/outdoor toggles
         indoor_ok = bool(data.get("indoor_ok", True))
         outdoor_ok = bool(data.get("outdoor_ok", True))
         if indoor_ok and not outdoor_ok:
@@ -158,10 +162,9 @@ class PlanViewSet(viewsets.ModelViewSet):
             "start_time": start_dt.isoformat() if start_dt else None,
             "end_time": end_dt.isoformat() if end_dt else None,
             "duration_hours": duration_hours,
-            # optional manual override for QA
-            "weather": data.get("weather"),
+            "weather": data.get("weather"),  # Manual override for QA
 
-            # ========== V2 BACK-COMPAT (keep your existing knobs) ==========
+            # ========== V2 BACK-COMPAT ==========
             "mode": data.get("mode", "travel"),
             "mood": data.get("mood", "curious"),
             "energy": data.get("energy", 2),
@@ -171,25 +174,22 @@ class PlanViewSet(viewsets.ModelViewSet):
             "avoid": avoid,
             "indoor_ok": indoor_ok,
             "outdoor_ok": outdoor_ok,
-
-            # Theme Engine V2 (optional)
             "theme": data.get("theme"),
             "budget_feeling": data.get("budget_feeling"),
         }
 
-        # Create Plan model row
+        # Create Plan
         plan = Plan.objects.create(
             user=request.user,
             status="building",
             start_time_utc=start_dt,
             end_time_utc=end_dt,
             inputs_json=inputs_json,
-            # Keep these model fields in sync if you want
             theme=data.get("theme"),
             budget_feeling=data.get("budget_feeling") or data.get("budget"),
         )
 
-        # Trigger async build
+        # Trigger async generation
         generate_plan_task.delay(str(plan.id))
 
         return Response(
@@ -197,13 +197,200 @@ class PlanViewSet(viewsets.ModelViewSet):
                 "plan_id": str(plan.id),
                 "status": "building",
                 "engine_version": inputs_json["engine_version"],
+                "intent": inputs_json["intent"],
                 "when": inputs_json["when_selection"],
+                "message": "Plan generation started. Poll /api/plans/{id}/ for status.",
             },
             status=status.HTTP_202_ACCEPTED,
         )
 
+    @action(detail=True, methods=["get"])
+    def presentation(self, request, pk=None):
+        """
+        GET /api/plans/{id}/presentation/ - UI-friendly format (V3 Spec 4.2)
+        
+        Returns:
+          - context: city, time, weather
+          - guide: local_typicals, climate_advice, tips
+          - timeline: slots with selected stops
+          - options_by_slot: alternative candidates
+          - map: stops + legs with polylines
+          - debug: engine metadata
+        """
+        plan = self.get_object()
+        
+        if plan.status not in ['ready', 'active', 'completed']:
+            return Response(
+                {
+                    "error": f"Plan must be ready/active/completed, not {plan.status}",
+                    "hint": "Wait for plan generation to finish. Check status at /api/plans/{id}/"
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Extract data
+        meta = plan.optimization_metadata or {}
+        v3 = meta.get('v3') or {}
+        inputs = plan.inputs_json or {}
+        
+        # Timezone handling
+        timezone_str = inputs.get('timezone', 'Europe/Berlin')
+        try:
+            import pytz
+            tz = pytz.timezone(timezone_str)
+        except:
+            import pytz
+            tz = pytz.UTC
+        
+        dt_local = plan.start_time_utc.astimezone(tz)
+        weather = plan.weather_snapshot_json or {}
+        
+        # Build context
+        context = {
+            "city_name": inputs.get('city_name') or inputs.get('city'),
+            "dt_local": dt_local.isoformat(),
+            "timezone": timezone_str,
+            "weather": {
+                "temp": weather.get('temp'),
+                "feels_like": weather.get('feels_like'),
+                "condition": weather.get('condition'),
+                "is_raining": weather.get('is_raining', False),
+                "is_snowing": weather.get('is_snowing', False),
+                "precip_prob": weather.get('precip_prob', 0),
+                "confidence": weather.get('confidence', 'low')
+            }
+        }
+        
+        # Guide (from LLM or fallback)
+        guide_data = v3.get('guide') or {
+            "headline": "    Plan listo",
+            "summary": "Tu plan está optimizado para el clima y horarios actuales.",
+            "climate_advice": [],
+            "local_typicals": {"food": [], "drinks": []},
+            "per_slot_order_tips": [],
+            "practical_notes": []
+        }
+        
+        # Timeline (from stops)
+        stops = plan.stops.all().order_by('order_index')
+        timeline = []
+        
+        for stop in stops:
+            # Get slot_id from score_breakdown
+            slot_id = stop.score_breakdown.get('slot_id', f'slot_{stop.order_index}')
+            slot_title = stop.score_breakdown.get('slot_title', stop.category)
+            
+            # Calculate end time
+            end_time = stop.start_time_utc + timedelta(minutes=stop.duration_min)
+            
+            timeline.append({
+                "slot_id": slot_id,
+                "title": slot_title,
+                "start": stop.start_time_utc.astimezone(tz).isoformat(),
+                "end": end_time.astimezone(tz).isoformat(),
+                "why_now": stop.why_now or "",
+                "selected": {
+                    "stop_id": str(stop.id),
+                    "place_id": stop.place_id,
+                    "name": stop.name,
+                    "category": stop.category,
+                    "lat": float(stop.lat),
+                    "lng": float(stop.lng),
+                    "rating": stop.rating,
+                    "photo_reference": stop.photo_reference,
+                    "open_status_at_planned_time": stop.open_status_at_planned_time,
+                    "open_confidence": stop.open_confidence or "",
+                    "open_status_reason": stop.open_status_reason or ""
+                }
+            })
+        
+        # Options by slot (from v3 metadata)
+        slots_data = v3.get('slots') or []
+        options_by_slot = []
+        
+        for slot in slots_data:
+            slot_id = slot.get('slot_id')
+            opts = []
+            
+            # Top 8 candidates per slot
+            for opt in (slot.get('options') or [])[:8]:
+                place = opt.get('place') or {}
+                opts.append({
+                    "place_id": place.get('place_id'),
+                    "name": place.get('name'),
+                    "category": place.get('category'),
+                    "rating": place.get('rating'),
+                    "distance_m": opt.get('distance_m'),
+                    "open": opt.get('open'),
+                    "open_confidence": opt.get('open_confidence', ''),
+                    "open_reason": opt.get('open_reason', '')
+                })
+            
+            if opts:
+                options_by_slot.append({
+                    "slot_id": slot_id,
+                    "title": slot.get('title', ''),
+                    "options": opts
+                })
+        
+        # Map data
+        map_stops = []
+        for stop in stops:
+            map_stops.append({
+                "stop_id": str(stop.id),
+                "name": stop.name,
+                "lat": float(stop.lat),
+                "lng": float(stop.lng),
+                "slot_id": stop.score_breakdown.get('slot_id', f'slot_{stop.order_index}'),
+                "category": stop.category
+            })
+        
+        # Legs with all modes
+        legs = plan.legs.all().order_by('from_stop__order_index')
+        map_legs = []
+        
+        for leg in legs:
+            modes_data = leg.modes_json or {}
+            
+            map_legs.append({
+                "from_stop_id": str(leg.from_stop_id),
+                "to_stop_id": str(leg.to_stop_id),
+                "recommended_mode": leg.recommended_mode,
+                "recommended_distance_m": leg.recommended_distance_m,
+                "recommended_duration_sec": leg.recommended_duration_sec,
+                "modes": modes_data  # Contains walk/bike/drive with polylines
+            })
+        
+        # Debug info
+        debug = v3.get('debug') or {}
+        debug_output = {
+            "engine": debug.get('engine', 'v3'),
+            "template": debug.get('template'),
+            "intent": inputs.get('intent'),
+            "daypart": debug.get('daypart'),
+            "slot_count": debug.get('slot_count', len(timeline)),
+            "generation_method": plan.generation_method,
+            "weather_confidence": weather.get('confidence')
+        }
+        
+        # Final response
+        return Response({
+            "plan_id": str(plan.id),
+            "status": plan.status,
+            "context": context,
+            "guide": guide_data,
+            "timeline": timeline,
+            "options_by_slot": options_by_slot,
+            "map": {
+                "stops": map_stops,
+                "legs": map_legs
+            },
+            "debug": debug_output
+        })
+
     @action(detail=True, methods=["post"])
     def start(self, request, pk=None):
+        """POST /api/plans/{id}/start/ - Activate plan"""
         plan = self.get_object()
 
         if plan.status != "ready":
@@ -220,6 +407,7 @@ class PlanViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="swap-stop")
     def swap_stop(self, request, pk=None):
+        """POST /api/plans/{id}/swap-stop/ - Replace a stop"""
         plan = self.get_object()
         serializer = SwapStopInputSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -245,6 +433,7 @@ class PlanViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def delay(self, request, pk=None):
+        """POST /api/plans/{id}/delay/ - Delay plan start"""
         plan = self.get_object()
         serializer = DelayInputSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -270,10 +459,7 @@ class PlanViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def pause(self, request, pk=None):
-        """
-        NOTE: Model Plan.STATUS_CHOICES does NOT include 'paused'.
-        We keep status valid and store paused flag in optimization_metadata.
-        """
+        """POST /api/plans/{id}/pause/ - Pause active plan"""
         plan = self.get_object()
 
         if plan.status != "active":
@@ -293,6 +479,7 @@ class PlanViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
+        """POST /api/plans/{id}/resume/ - Resume paused plan"""
         plan = self.get_object()
 
         meta = plan.optimization_metadata or {}
@@ -306,6 +493,7 @@ class PlanViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def complete(self, request, pk=None):
+        """POST /api/plans/{id}/complete/ - Mark plan complete"""
         plan = self.get_object()
         plan.status = "completed"
         plan.save()
@@ -315,10 +503,7 @@ class PlanViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def archive(self, request, pk=None):
-        """
-        NOTE: Model Plan.STATUS_CHOICES does NOT include 'archived'.
-        We keep status valid and store archived flag in optimization_metadata.
-        """
+        """POST /api/plans/{id}/archive/ - Archive plan"""
         plan = self.get_object()
 
         meta = plan.optimization_metadata or {}
@@ -326,7 +511,6 @@ class PlanViewSet(viewsets.ModelViewSet):
         meta["archived_at"] = dj_timezone.now().isoformat()
         plan.optimization_metadata = meta
 
-        # keep a valid status
         if plan.status not in ["completed", "failed"]:
             plan.status = "completed"
 
@@ -336,6 +520,7 @@ class PlanViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def remove_stop(self, request, pk=None):
+        """POST /api/plans/{id}/remove_stop/ - Remove stop from plan"""
         plan = self.get_object()
         stop_id = request.data.get("stop_id")
 
@@ -353,6 +538,7 @@ class PlanViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def adjust_duration(self, request, pk=None):
+        """POST /api/plans/{id}/adjust_duration/ - Change stop duration"""
         plan = self.get_object()
         stop_id = request.data.get("stop_id")
         new_duration = request.data.get("duration_min")
@@ -366,6 +552,7 @@ class PlanViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def lock_confidence(self, request, pk=None):
+        """POST /api/plans/{id}/lock_confidence/ - Lock plan (no more suggestions)"""
         plan = self.get_object()
 
         if plan.status not in ["active", "ready"]:
@@ -384,6 +571,7 @@ class PlanViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def unlock_confidence(self, request, pk=None):
+        """POST /api/plans/{id}/unlock_confidence/ - Unlock plan"""
         plan = self.get_object()
 
         plan.confidence_locked = False
@@ -394,9 +582,7 @@ class PlanViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def undo_swap(self, request, pk=None):
-        """
-        Undo swap (kept as-is, triggers task).
-        """
+        """POST /api/plans/{id}/undo_swap/ - Undo last swap"""
         plan = self.get_object()
         stop_id = request.data.get("stop_id")
 
@@ -426,6 +612,7 @@ class PlanViewSet(viewsets.ModelViewSet):
 
 
 class StopFeedbackViewSet(viewsets.ModelViewSet):
+    """Feedback on stops"""
     serializer_class = StopFeedbackSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -438,9 +625,111 @@ class StopFeedbackViewSet(viewsets.ModelViewSet):
         serializer.save(user=self.request.user)
 
 
+class SavedPlaceViewSet(viewsets.ModelViewSet):
+    """User's saved/favorite places"""
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return SavedPlace.objects.filter(user=self.request.user)
+
+    def get_serializer_class(self):
+        if self.action == "list":
+            return SavedPlaceListSerializer
+        elif self.action == "create":
+            return SavedPlaceCreateSerializer
+        return SavedPlaceSerializer
+
+    def create(self, request, *args, **kwargs):
+        """POST /api/saved-places/ - Save a place"""
+        serializer = self.get_serializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            saved_place = serializer.save()
+            output_serializer = SavedPlaceSerializer(saved_place)
+            return Response(output_serializer.data, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def destroy(self, request, *args, **kwargs):
+        """DELETE /api/saved-places/{id}/ - Remove from saved"""
+        instance = self.get_object()
+        instance.delete()
+        return Response({"message": "Place removed from saved"}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["post"])
+    def check(self, request):
+        """POST /api/saved-places/check/ - Check if place is saved"""
+        place_id = request.data.get("place_id")
+        if not place_id:
+            return Response(
+                {"error": "place_id required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            saved_place = SavedPlace.objects.get(user=request.user, place_id=place_id)
+            return Response({"is_saved": True, "saved_place_id": saved_place.id})
+        except SavedPlace.DoesNotExist:
+            return Response({"is_saved": False, "saved_place_id": None})
+
+    @action(detail=False, methods=["post"])
+    def toggle(self, request):
+        """POST /api/saved-places/toggle/ - Toggle saved status"""
+        place_id = request.data.get("place_id")
+        if not place_id:
+            return Response(
+                {"error": "place_id required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            saved_place = SavedPlace.objects.get(user=request.user, place_id=place_id)
+            saved_place.delete()
+            return Response(
+                {"is_saved": False, "saved_place": None, "message": "Place removed from saved"}
+            )
+        except SavedPlace.DoesNotExist:
+            serializer = SavedPlaceCreateSerializer(
+                data=request.data, context={"request": request}
+            )
+            if serializer.is_valid():
+                saved_place = serializer.save()
+                output_serializer = SavedPlaceSerializer(saved_place)
+                return Response(
+                    {
+                        "is_saved": True,
+                        "saved_place": output_serializer.data,
+                        "message": "Place saved",
+                    },
+                    status=status.HTTP_201_CREATED,
+                )
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=["post"])
+    def mark_visited(self, request, pk=None):
+        """POST /api/saved-places/{id}/mark_visited/ - Mark as visited"""
+        saved_place = self.get_object()
+        saved_place.visited = True
+        saved_place.visited_at = dj_timezone.now()
+        saved_place.save()
+        serializer = SavedPlaceSerializer(saved_place)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=["get"])
+    def for_map(self, request):
+        """GET /api/saved-places/for_map/ - Optimized for map display"""
+        saved_places = self.get_queryset()
+        serializer = SavedPlaceListSerializer(saved_places, many=True)
+        return Response(serializer.data)
+
+
+# ============================================
+# AUTH ENDPOINTS
+# ============================================
+
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def register(request):
+    """POST /api/auth/register/ - Create new user"""
     username = request.data.get("username")
     email = request.data.get("email")
     password = request.data.get("password")
@@ -485,108 +774,45 @@ def register(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def feature_flags(request):
+    """GET /api/feature-flags/ - Available features"""
     mode = request.GET.get("mode", "today")
+    
+    # V3 features
+    available_intents = [
+        "chill",
+        "shop_local",
+        "museum",
+        "food_tour",
+        "nightlife",
+        "outdoor_active",
+        "romantic_date",
+        "coffee_hop",
+        "culture_alt_late",
+    ]
+    
     return Response(
         {
-            "theme_engine_v2": is_theme_engine_v2_enabled(),
-            "available_themes": get_available_themes(mode)
-            if is_theme_engine_v2_enabled()
-            else [],
+            "engine_version": "v3",
+            "available_intents": available_intents,
             "features": {
-                "themes": is_theme_engine_v2_enabled(),
-                "budget_matching": is_theme_engine_v2_enabled(),
-                "opening_hours": is_theme_engine_v2_enabled(),
-                "daypart_awareness": is_theme_engine_v2_enabled(),
+                "llm_guide": True,
+                "city_dna": True,
+                "opening_hours": True,
+                "weather_required": True,
+                "presentation_endpoint": True,
+                "constraints_validation": True,
             },
+            "constraints": [
+                "no_walk",
+                "indoor_only",
+                "outdoor_only",
+                "quiet",
+                "no_alcohol",
+                "vegan",
+                "vegetarian",
+                "kid_friendly",
+                "pet_friendly",
+                "wifi",
+            ]
         }
     )
-
-
-class SavedPlaceViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        return SavedPlace.objects.filter(user=self.request.user)
-
-    def get_serializer_class(self):
-        if self.action == "list":
-            return SavedPlaceListSerializer
-        elif self.action == "create":
-            return SavedPlaceCreateSerializer
-        return SavedPlaceSerializer
-
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data, context={"request": request})
-        serializer.is_valid(raise_exception=True)
-
-        try:
-            saved_place = serializer.save()
-            output_serializer = SavedPlaceSerializer(saved_place)
-            return Response(output_serializer.data, status=status.HTTP_201_CREATED)
-        except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
-    def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
-        instance.delete()
-        return Response({"message": "Place removed from saved"}, status=status.HTTP_200_OK)
-
-    @action(detail=False, methods=["post"])
-    def check(self, request):
-        place_id = request.data.get("place_id")
-        if not place_id:
-            return Response(
-                {"error": "place_id required"}, status=status.HTTP_400_BAD_REQUEST
-            )
-
-        try:
-            saved_place = SavedPlace.objects.get(user=request.user, place_id=place_id)
-            return Response({"is_saved": True, "saved_place_id": saved_place.id})
-        except SavedPlace.DoesNotExist:
-            return Response({"is_saved": False, "saved_place_id": None})
-
-    @action(detail=False, methods=["post"])
-    def toggle(self, request):
-        place_id = request.data.get("place_id")
-        if not place_id:
-            return Response(
-                {"error": "place_id required"}, status=status.HTTP_400_BAD_REQUEST
-            )
-
-        try:
-            saved_place = SavedPlace.objects.get(user=request.user, place_id=place_id)
-            saved_place.delete()
-            return Response(
-                {"is_saved": False, "saved_place": None, "message": "Place removed from saved"}
-            )
-        except SavedPlace.DoesNotExist:
-            serializer = SavedPlaceCreateSerializer(
-                data=request.data, context={"request": request}
-            )
-            if serializer.is_valid():
-                saved_place = serializer.save()
-                output_serializer = SavedPlaceSerializer(saved_place)
-                return Response(
-                    {
-                        "is_saved": True,
-                        "saved_place": output_serializer.data,
-                        "message": "Place saved",
-                    },
-                    status=status.HTTP_201_CREATED,
-                )
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-    @action(detail=True, methods=["post"])
-    def mark_visited(self, request, pk=None):
-        saved_place = self.get_object()
-        saved_place.visited = True
-        saved_place.visited_at = dj_timezone.now()
-        saved_place.save()
-        serializer = SavedPlaceSerializer(saved_place)
-        return Response(serializer.data)
-
-    @action(detail=False, methods=["get"])
-    def for_map(self, request):
-        saved_places = self.get_queryset()
-        serializer = SavedPlaceListSerializer(saved_places, many=True)
-        return Response(serializer.data)
