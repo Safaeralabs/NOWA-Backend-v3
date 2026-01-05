@@ -196,6 +196,17 @@ def generate_plan_task(self, plan_id: str) -> bool:
         logger.info(f"    Weather: {weather_snapshot.get('temp')}°C, {weather_snapshot.get('condition')}")
 
         # Generate plan
+        start_dt = plan.start_time_utc.astimezone(tz)
+        end_dt = plan.end_time_utc.astimezone(tz)
+        
+        try:
+            duration_hours = (end_dt - start_dt).total_seconds() / 3600.0
+        except Exception:
+            duration_hours = 4.0
+        energy_level = inputs.get("energy", 2)  # 0-3 from serializer
+        energy_str = "low" if energy_level <= 1 else ("high" if energy_level >= 2 else "medium")
+        
+        logger.info(f"    Plan duration: {duration_hours:.1f}h, energy: {energy_str}")
         logger.info(f"    Generating plan with intent={inputs.get('intent')}...")
         result = engine.generate(
             inputs={
@@ -205,11 +216,15 @@ def generate_plan_task(self, plan_id: str) -> bool:
                 "constraints": inputs.get("constraints") or [],
                 "city_name": city_name,
                 "user_location": user_location,
+                "energy": energy_level,  # ← FIXED: pass energy
+                "duration_hours": duration_hours,  # ← FIXED: pass duration
             },
             context={
                 "dt_local": dt_local,
                 "user_location": user_location,
                 "weather": weather_snapshot,
+                "start_time": start_dt,  # ← FIXED: pass explicit times
+                "end_time": end_dt,
             },
         )
 

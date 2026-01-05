@@ -186,7 +186,13 @@ class PlanInputSerializer(serializers.Serializer):
 
     # Core V3 intent
     intent = serializers.CharField(required=False, default='chill')
-    discovery_mode = serializers.ChoiceField(choices=['local', 'tourist'], required=False, default='local')
+    
+    # ========== FIX: Aceptar "mixed" en discovery_mode ==========
+    discovery_mode = serializers.ChoiceField(
+        choices=['local', 'tourist', 'mixed'],  # ← FIXED: agregar "mixed"
+        required=False, 
+        default='local'
+    )
 
     # Constraints (V3)
     constraints = serializers.ListField(
@@ -196,10 +202,10 @@ class PlanInputSerializer(serializers.Serializer):
     )
 
     # LLM controls (V3)
-    use_llm = serializers.BooleanField(required=False, default=False)
+    use_llm = serializers.BooleanField(required=False, default=True)
     llm_model = serializers.CharField(required=False, allow_blank=True, allow_null=True, default='gpt-4o-mini')
 
-    # Optional “copy-only” inputs
+    # Optional "copy-only" inputs
     companions = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     # Optional manual weather override (for QA/testing)
@@ -208,7 +214,8 @@ class PlanInputSerializer(serializers.Serializer):
     def validate(self, attrs):
         """
         Map when_selection to actual start_time & end_time.
-        Keeps your current behavior, but now uses timezone safely.
+        
+        ========== FIX: Respetar start_time explícito ==========
         """
         when = attrs.get('when_selection', 'now')
         timezone_str = attrs.get('timezone', 'Europe/Berlin')
@@ -218,23 +225,29 @@ class PlanInputSerializer(serializers.Serializer):
         tz = pytz.timezone(timezone_str)
         now = datetime.now(tz)
 
-        # Use existing start_time if user explicitly passed it AND when_selection is "now".
-        # Otherwise map using your heuristic.
+        # ========== FIX: Priorizar start_time explícito si se proporciona ==========
         user_start = attrs.get("start_time")
-        if user_start and when == "now":
-            # ensure tz-aware in requested tz
+        
+        if user_start:
+            # Usuario dio un start_time explícito - RESPETARLO
             if user_start.tzinfo is None:
                 user_start = tz.localize(user_start)
             else:
                 user_start = user_start.astimezone(tz)
-            start_time = user_start
+            
+            # Validar que no esté en el pasado
+            if user_start < now:
+                # Si está en el pasado, usar "now" pero advertir
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"start_time in the past ({user_start}), using now ({now})")
+                start_time = now
+                attrs['when_selection'] = 'now'
+            else:
+                start_time = user_start
         else:
+            # No hay start_time explícito - mapear desde when_selection
             start_time = self._map_when_to_time(when, mode, now, tz)
-
-        # if mapped time is in the past, default to now
-        if start_time < now:
-            start_time = now
-            attrs['when_selection'] = 'now'
 
         attrs['start_time'] = start_time
 
@@ -315,7 +328,6 @@ class PlanInputSerializer(serializers.Serializer):
 
 # Alias for compatibility
 PlanCreateSerializer = PlanInputSerializer
-
 
 class SwapStopInputSerializer(serializers.Serializer):
     stop_id = serializers.UUIDField()

@@ -45,19 +45,19 @@ class V3PlannerEngine:
         V3 core entrypoint.
 
         Required inputs:
-          - city_name: str
-          - user_location: {lat, lng}
-          - intent: str (chill, food_tour, etc)
-          - when_selection: str (now, later_today, tonight, tomorrow)
-          - discovery_mode: str (local, tourist)
-          - constraints: List[str]
+        - city_name: str
+        - user_location: {lat, lng}
+        - intent: str (chill, food_tour, etc)
+        - when_selection: str (now, later_today, tonight, tomorrow)
+        - discovery_mode: str (local, tourist, mixed)  ← FIXED: accept mixed
+        - constraints: List[str]
 
         Required context:
-          - dt_local: datetime (tz-aware)
-          - weather: dict (mandatory, fetched by providers if missing)
+        - dt_local: datetime (tz-aware)
+        - weather: dict (mandatory, fetched by providers if missing)
 
         Returns:
-          V3PlanResult with slots, chosen_stops, legs, debug
+        V3PlanResult with slots, chosen_stops, legs, debug
         """
         dt_local: datetime = context["dt_local"]
 
@@ -78,10 +78,25 @@ class V3PlannerEngine:
         discovery_mode = (inputs.get("discovery_mode") or "local").strip().lower()
         constraints = inputs.get("constraints") or []
 
+        # ========== FIX: Extract energy & duration for dynamic templates ==========
+        energy_level = inputs.get("energy", 2)  # 0-3 scale
+        energy_str = "low" if energy_level <= 1 else ("high" if energy_level >= 2 else "medium")
+        
+        # Calculate duration in hours
+        start_time = context.get("start_time") or dt_local
+        end_time = context.get("end_time")
+        if end_time:
+            try:
+                duration_hours = (end_time - start_time).total_seconds() / 3600.0
+            except:
+                duration_hours = 4.0
+        else:
+            duration_hours = inputs.get("duration_hours", 4.0)
+
         hour = dt_local.hour
         daypart = get_daypart(dt_local)
 
-        logger.info(f"    V3 Generate: intent={intent}, when={when}, daypart={daypart}, hour={hour}")
+        logger.info(f"    V3 Generate: intent={intent}, when={when}, daypart={daypart}, hour={hour}, duration={duration_hours:.1f}h, energy={energy_str}")
 
         # Weather is mandatory
         weather = context.get("weather")
@@ -91,11 +106,16 @@ class V3PlannerEngine:
 
         logger.info(f"   Weather: {weather.get('temp')}°C, {weather.get('condition')}, confidence={weather.get('confidence')}")
 
-        # Choose template based on intent + time
-        template_key = choose_template(intent=intent, when_selection=when, hour=hour)
-        slot_specs: List[SlotSpec] = INTENT_TEMPLATES.get(template_key, [])
+        # ========== FIX: Use dynamic choose_template ==========
+        template_key, slot_specs = choose_template(
+            intent=intent, 
+            when_selection=when, 
+            hour=hour,
+            duration_hours=duration_hours,
+            energy=energy_str
+        )
 
-        logger.info(f"    Template: {template_key}, slots={len(slot_specs)}")
+        logger.info(f"    Template: {template_key}, slots={len(slot_specs)} (adjusted for {duration_hours:.1f}h, energy={energy_str})")
 
         # Build slots (climate affects STRUCTURE)
         slots = self._build_slots(dt_local=dt_local, slot_specs=slot_specs, weather=weather)
@@ -144,6 +164,8 @@ class V3PlannerEngine:
                 "intent": intent,
                 "daypart": daypart,
                 "slot_count": len(filled_slots),
+                "duration_hours": duration_hours,
+                "energy_level": energy_str,
                 "weather_confidence": (weather or {}).get("confidence"),
             },
         )
