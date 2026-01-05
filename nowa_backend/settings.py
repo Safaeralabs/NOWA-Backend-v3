@@ -33,19 +33,16 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # ==========================================
 SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'dev-secret-key-CHANGE-IN-PRODUCTION-xyz123')
 
-DEBUG = os.environ.get('DEBUG', 'False') == 'True'  # READY Default False para seguridad
+DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
 ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
-# READY Security settings para producción
 if not DEBUG:
-    # Proxy configuration for Railway
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     USE_X_FORWARDED_HOST = True
     USE_X_FORWARDED_PORT = True
     
-    # Security settings (desactivados temporalmente)
-    SECURE_SSL_REDIRECT = False  # No redirigir, Railway maneja HTTPS
+    SECURE_SSL_REDIRECT = False
     SESSION_COOKIE_SECURE = False
     CSRF_COOKIE_SECURE = False
     SECURE_BROWSER_XSS_FILTER = True
@@ -119,11 +116,7 @@ WSGI_APPLICATION = 'nowa_backend.wsgi.application'
 # ==========================================
 # DATABASE
 # ==========================================
-# READY SQLite para desarrollo local
-# Database
-
 if DEBUG:
-    # SQLite para desarrollo
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
@@ -131,7 +124,6 @@ if DEBUG:
         }
     }
 else:
-    # PostgreSQL para producción
     DATABASES = {
         'default': dj_database_url.config(
             default=os.getenv('DATABASE_URL'),
@@ -166,7 +158,6 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
-# READY WhiteNoise configuration
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 
@@ -193,7 +184,6 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 50,
 }
 
-# READY JWT Configuration
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=24),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
@@ -206,7 +196,6 @@ SIMPLE_JWT = {
 # ==========================================
 # CORS
 # ==========================================
-# CORS Configuration
 CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'False') == 'True'
 
 if not CORS_ALLOW_ALL_ORIGINS:
@@ -240,7 +229,6 @@ if DEBUG:
         }
     }
 else:
-    # READY Redis cache en producción
     CACHES = {
         'default': {
             'BACKEND': 'django.core.cache.backends.redis.RedisCache',
@@ -250,16 +238,20 @@ else:
 
 
 # ==========================================
-# CELERY
+# CELERY (UPDATED - Use Redis even in DEBUG)
 # ==========================================
-if DEBUG:
-    # READY Development: Run tasks synchronously (no Redis needed)
+# Check if Redis is available for development
+USE_REDIS_IN_DEV = os.environ.get('USE_REDIS_IN_DEV', 'False') == 'True'
+
+if DEBUG and not USE_REDIS_IN_DEV:
+    # Development sin Redis: tareas síncronas (más lento pero sin dependencias)
     CELERY_TASK_ALWAYS_EAGER = True
     CELERY_TASK_EAGER_PROPAGATES = True
     CELERY_BROKER_URL = 'memory://'
     CELERY_RESULT_BACKEND = 'cache+memory://'
 else:
-    # READY Production: Use Redis
+    # Production O Development con Redis: tareas asíncronas (más rápido)
+    CELERY_TASK_ALWAYS_EAGER = False
     CELERY_BROKER_URL = os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/0')
     CELERY_RESULT_BACKEND = os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/0')
 
@@ -268,7 +260,8 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
-CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutos max por tarea
+CELERY_TASK_TIME_LIMIT = 30 * 60
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True  # Fix deprecation warning
 
 
 # ==========================================
@@ -278,14 +271,12 @@ GOOGLE_PLACES_API_KEY = os.environ.get('GOOGLE_PLACES_API_KEY', '')
 GOOGLE_DIRECTIONS_API_KEY = os.environ.get('GOOGLE_DIRECTIONS_API_KEY', '')
 OPENWEATHER_API_KEY = os.environ.get('OPENWEATHER_API_KEY', '')
 
-# READY LLM Configuration
-LLM_PROVIDER = os.environ.get('LLM_PROVIDER', 'openai')  # 'openai' o 'anthropic'
+LLM_PROVIDER = os.environ.get('LLM_PROVIDER', 'openai')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
 OPENAI_MODEL = os.environ.get('OPENAI_MODEL', 'gpt-4o')
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 ANTHROPIC_MODEL = os.environ.get('ANTHROPIC_MODEL', 'claude-sonnet-4-20250514')
 
-# READY Validar API keys críticas en producción
 if not DEBUG:
     critical_keys = {
         'GOOGLE_PLACES_API_KEY': GOOGLE_PLACES_API_KEY,
@@ -306,9 +297,6 @@ if not DEBUG:
 # ==========================================
 # LOGGING
 # ==========================================
-
-# En Railway no conviene escribir en /app porque puede no existir / no ser persistente.
-# /tmp sí existe (aunque sea efímero), y Railway captura stdout igual.
 if os.getenv('RAILWAY_ENVIRONMENT'):
     LOGS_DIR = '/tmp/logs'
 else:
@@ -385,8 +373,7 @@ if DEBUG:
 # DEVELOPMENT OVERRIDES
 # ==========================================
 if DEBUG:
-    # READY En desarrollo, mostrar más detalles
     LOGGING['loggers']['plans']['level'] = 'DEBUG'
     LOGGING['loggers']['celery']['level'] = 'DEBUG'
 
-
+USE_REDIS_IN_DEV=True

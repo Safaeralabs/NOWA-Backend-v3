@@ -515,6 +515,10 @@ class Providers:
         if not isinstance(opening_hours, dict):
             opening_hours = {}
 
+        # Extract photo_reference from Google's photos array
+        photos = p.get("photos") or []
+        photo_reference = photos[0].get("photo_reference") if photos else None
+
         return {
             "place_id": p.get("place_id"),
             "name": p.get("name"),
@@ -530,7 +534,8 @@ class Providers:
             "noise_level": None,
             "tourist_density": 0,
             "local_favorite": False,
-        }
+            "photo_reference": photo_reference,  # ✅ AÑADIDO
+}
 
     def _guess_category(self, provider_types: List[str], desired_categories: List[str]) -> str:
         """

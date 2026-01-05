@@ -289,6 +289,7 @@ def generate_plan_task(self, plan_id: str) -> bool:
                         "distance_m": opt.get("distance_m"),
                         "open": opt.get("open"),
                         "open_confidence": opt.get("open_confidence"),
+                        "photo_reference": p.get("photo_reference"),  # ✅ AÑADIDO
                     })
                 options_by_slot.append({"slot_id": slot_id, "options": opts})
 

@@ -72,27 +72,31 @@ INTENT_TEMPLATES: Dict[str, List[SlotSpec]] = {
     ],
     
     # === FOOD EXPERIENCES ===
-    "food_tour": [
-        SlotSpec("street_food", "🌮 Street food auténtico", 35,
-                 categories=["street_food", "food_truck", "market_stall"],
-                 role="anchor"),
-        SlotSpec("local_restaurant", "🍽️ Restaurante local típico", 75,
-                 categories=["local_restaurant", "traditional_food", "ethnic_restaurant"],
-                 role="reward"),
-        SlotSpec("dessert_spot", "🍰 Postre típico", 30,
-                 categories=["dessert", "bakery", "ice_cream", "patisserie"],
-                 role="nice"),
-    ],
-    
-    "coffee_hop": [
-        SlotSpec("specialty_coffee_1", "☕ Café de especialidad", 40,
-                 categories=["specialty_coffee", "roastery", "third_wave_coffee"],
-                 constraints=["indoor", "quiet"], role="anchor"),
-        SlotSpec("pastry", "🥐 Pastelería artesanal", 30,
-                 categories=["bakery", "patisserie"], role="nice"),
-        SlotSpec("specialty_coffee_2", "☕ Segunda parada café", 35,
-                 categories=["cafe", "specialty_coffee"], role="optional"),
-    ],
+# === FOOD EXPERIENCES (IMPROVED) ===
+"food_tour": [
+    SlotSpec("local_bite", "🌮 Comida callejera / casual", 40,
+             categories=["meal_takeaway", "fast_food_restaurant", "sandwich_shop", "bakery"],
+             constraints=[], role="anchor"),
+    SlotSpec("main_restaurant", "🍽️ Restaurante local destacado", 75,
+             categories=["restaurant", "seafood_restaurant", "mediterranean_restaurant", 
+                        "indian_restaurant", "mexican_restaurant", "italian_restaurant"],
+             constraints=[], role="reward"),
+    SlotSpec("sweet_finish", "🍰 Dulce final", 30,
+             categories=["bakery", "ice_cream_shop", "dessert_shop", "cafe", "chocolate_shop"],
+             constraints=[], role="nice"),
+],
+
+"coffee_hop": [
+    SlotSpec("specialty_coffee_1", "☕ Café de especialidad", 40,
+             categories=["coffee_shop", "cafe"],
+             constraints=["indoor"], role="anchor"),
+    SlotSpec("pastry", "🥐 Pastelería artesanal", 30,
+             categories=["bakery", "cafe"], 
+             constraints=[], role="nice"),
+    SlotSpec("specialty_coffee_2", "☕ Segunda parada café", 35,
+             categories=["coffee_shop", "cafe", "tea_house"], 
+             constraints=[], role="optional"),
+],
     
     # === NIGHTLIFE ===
     "nightlife": [

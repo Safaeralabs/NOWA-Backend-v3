@@ -210,12 +210,12 @@ class PlanViewSet(viewsets.ModelViewSet):
         GET /api/plans/{id}/presentation/ - UI-friendly format (V3 Spec 4.2)
         
         Returns:
-          - context: city, time, weather
-          - guide: local_typicals, climate_advice, tips
-          - timeline: slots with selected stops
-          - options_by_slot: alternative candidates
-          - map: stops + legs with polylines
-          - debug: engine metadata
+        - context: city, time, weather
+        - guide: local_typicals, climate_advice, tips
+        - timeline: slots with selected stops
+        - options_by_slot: alternative candidates
+        - map: stops + legs with polylines
+        - debug: engine metadata
         """
         plan = self.get_object()
         
@@ -228,6 +228,18 @@ class PlanViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        from django.conf import settings
+
+        def build_photo_url(photo_reference):
+            """Convert Google photo_reference to full URL"""
+            if not photo_reference:
+                return None
+            api_key = getattr(settings, 'GOOGLE_PLACES_API_KEY', None)
+            if not api_key:
+                return None
+            return f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference={photo_reference}&key={api_key}"
+        
+            
         # Extract data
         meta = plan.optimization_metadata or {}
         v3 = meta.get('v3') or {}
@@ -263,7 +275,7 @@ class PlanViewSet(viewsets.ModelViewSet):
         
         # Guide (from LLM or fallback)
         guide_data = v3.get('guide') or {
-            "headline": "    Plan listo",
+            "headline": "Plan listo",
             "summary": "Tu plan está optimizado para el clima y horarios actuales.",
             "climate_advice": [],
             "local_typicals": {"food": [], "drinks": []},
@@ -274,6 +286,8 @@ class PlanViewSet(viewsets.ModelViewSet):
         # Timeline (from stops)
         stops = plan.stops.all().order_by('order_index')
         timeline = []
+
+        stop_photo_map = {}  # place_id -> photo_url
         
         for stop in stops:
             # Get slot_id from score_breakdown
@@ -282,6 +296,13 @@ class PlanViewSet(viewsets.ModelViewSet):
             
             # Calculate end time
             end_time = stop.start_time_utc + timedelta(minutes=stop.duration_min)
+            
+            # ✅ FIX: Build photo_url BEFORE using it
+            photo_url = build_photo_url(stop.photo_reference)
+            
+            # Cache for options_by_slot
+            if stop.place_id:
+                stop_photo_map[stop.place_id] = photo_url
             
             timeline.append({
                 "slot_id": slot_id,
@@ -297,7 +318,7 @@ class PlanViewSet(viewsets.ModelViewSet):
                     "lat": float(stop.lat),
                     "lng": float(stop.lng),
                     "rating": stop.rating,
-                    "photo_reference": stop.photo_reference,
+                    "photo_url": photo_url,  # ✅ Now defined
                     "open_status_at_planned_time": stop.open_status_at_planned_time,
                     "open_confidence": stop.open_confidence or "",
                     "open_status_reason": stop.open_status_reason or ""
@@ -312,18 +333,23 @@ class PlanViewSet(viewsets.ModelViewSet):
             slot_id = slot.get('slot_id')
             opts = []
             
-            # Top 8 candidates per slot
             for opt in (slot.get('options') or [])[:8]:
                 place = opt.get('place') or {}
+                place_id = place.get('place_id')
+                
+                # Get photo from cache or build from reference
+                photo_url = stop_photo_map.get(place_id) or build_photo_url(place.get('photo_reference'))
+                
                 opts.append({
-                    "place_id": place.get('place_id'),
+                    "place_id": place_id,
                     "name": place.get('name'),
                     "category": place.get('category'),
                     "rating": place.get('rating'),
                     "distance_m": opt.get('distance_m'),
                     "open": opt.get('open'),
                     "open_confidence": opt.get('open_confidence', ''),
-                    "open_reason": opt.get('open_reason', '')
+                    "open_reason": opt.get('open_reason', ''),
+                    "photo_url": photo_url,  
                 })
             
             if opts:
@@ -358,7 +384,7 @@ class PlanViewSet(viewsets.ModelViewSet):
                 "recommended_mode": leg.recommended_mode,
                 "recommended_distance_m": leg.recommended_distance_m,
                 "recommended_duration_sec": leg.recommended_duration_sec,
-                "modes": modes_data  # Contains walk/bike/drive with polylines
+                "modes": modes_data
             })
         
         # Debug info
@@ -373,7 +399,6 @@ class PlanViewSet(viewsets.ModelViewSet):
             "weather_confidence": weather.get('confidence')
         }
         
-        # Final response
         return Response({
             "plan_id": str(plan.id),
             "status": plan.status,
