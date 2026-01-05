@@ -50,7 +50,7 @@ def haversine_m(a: Dict[str, float], b: Dict[str, float]) -> float:
 
 class Providers:
     """
-    V3 Providers with OFFICIAL Google Places API type mapping.
+    V3     with OFFICIAL Google Places API type mapping.
     
     Based on: https://developers.google.com/maps/documentation/places/web-service/place-types
     - Table A: Types for filtering and responses
@@ -426,7 +426,7 @@ class Providers:
         for cat in (categories or [])[:6]:
             mapping = self.CATEGORY_TO_GOOGLE.get(cat)
             if not mapping:
-                logger.warning(f"⚠️ Unknown category '{cat}' - skipping")
+                logger.warning(f"    Unknown category '{cat}' - skipping")
                 continue
                 
             gtype = mapping.get("type")
@@ -442,7 +442,7 @@ class Providers:
             )
 
             # Diagnostic logging
-            logger.info(f"🔍 Google search for '{cat}' (type={gtype}, keyword={keyword}): {len(raw)} results")
+            logger.info(f"    Google search for '{cat}' (type={gtype}, keyword={keyword}): {len(raw)} results")
             for i, p in enumerate(raw[:3]):  # Log first 3
                 logger.info(f"  {i+1}. {p.get('name')} - types: {p.get('types')}")
 
@@ -455,7 +455,7 @@ class Providers:
                 if n:  # Only include if category is valid
                     normalized.append(n)
 
-        logger.info(f"✅ Total normalized candidates: {len(normalized)} (from {len(seen)} raw results)")
+        logger.info(f"   Total normalized candidates: {len(normalized)} (from {len(seen)} raw results)")
 
         # Optional enrichment
         if enrich_opening_hours:
@@ -506,9 +506,9 @@ class Providers:
         types = p.get("types") or []
         category_guess = self._guess_category(types, preferred_categories)
         
-        # ✅ STRICT FILTER: Only include if category matches request
+        #    STRICT FILTER: Only include if category matches request
         if category_guess == "other":
-            logger.debug(f"⚠️ Filtered '{p.get('name')}' - no valid category match (types: {types})")
+            logger.debug(f"    Filtered '{p.get('name')}' - no valid category match (types: {types})")
             return None
 
         opening_hours = p.get("opening_hours") or {}

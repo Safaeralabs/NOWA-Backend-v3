@@ -10,8 +10,7 @@ from .time_rules import get_daypart, compute_open_status, build_weather_profile
 from .scoring import score_place_for_slot
 from .optimizer import order_stops_nearest_neighbor
 from .llm import SlotLLM
-from .providers import Providers
-
+from .providers_core import Providers
 logger = logging.getLogger(__name__)
 
 

@@ -14,7 +14,7 @@ from .models import Plan, Stop, Leg
 
 from .engineV3.engine import V3PlannerEngine
 from .engineV3.llm import SlotLLM
-from .engineV3.providers import Providers as V3Providers
+from .engineV3.providers_core import Providers as V3Providers
 from .engineV3.providers.google_places_provider import build_google_places_provider
 from .engineV3.providers.weather_provider import build_weather_provider
 from .engineV3.providers.google_directions_provider import build_google_directions_provider

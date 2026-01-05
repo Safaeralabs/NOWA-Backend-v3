@@ -69,12 +69,12 @@ class SlotLLM:
             logger.warning(f"LLM fill failed: {e}, using fallback")
             return self._deterministic_fallback(context, ranked_slots)
 
-    # ========== ✅ FIX: DEDUPLICACIÓN EN FALLBACK ==========
+    # ==========    FIX: DEDUPLICACIÓN EN FALLBACK ==========
     def _deterministic_fallback(self, context: Dict[str, Any], ranked_slots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Deterministic fallback with place_id deduplication.
         
-        ✅ FIX: Evitar que el mismo lugar se seleccione para múltiples slots.
+           FIX: Evitar que el mismo lugar se seleccione para múltiples slots.
         """
         out = []
         used_place_ids = set()  # ← NUEVO: Track de lugares ya usados
@@ -85,7 +85,7 @@ class SlotLLM:
                 out.append({**slot, "selected_place_ids": [], "why_now": ""})
                 continue
             
-            # ✅ FIX: Buscar el primer lugar que NO esté duplicado
+            #    FIX: Buscar el primer lugar que NO esté duplicado
             chosen = None
             for opt in options:
                 place_id = opt["place"]["place_id"]
@@ -97,14 +97,14 @@ class SlotLLM:
             # Si TODOS los lugares ya están usados, usar el primero de todas formas
             if chosen is None:
                 chosen = options[0]["place"]["place_id"]
-                logger.warning(f"⚠️ Slot '{slot['slot_id']}' forced to reuse place_id (all candidates already used)")
+                logger.warning(f"    Slot '{slot['slot_id']}' forced to reuse place_id (all candidates already used)")
             
             why = self._simple_why_now(slot, context)
             out.append({**slot, "selected_place_ids": [chosen], "why_now": why})
         
         return out
 
-    # ========== ✅ FIX: DEDUPLICACIÓN EN LLM FILL ==========
+    # ==========    FIX: DEDUPLICACIÓN EN LLM FILL ==========
     def _llm_fill(self, context: Dict[str, Any], ranked_slots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Use LLM for soft picks + better why_now copy WITH deduplication"""
         compact_slots = []
@@ -168,7 +168,7 @@ class SlotLLM:
             why = p_data.get("why_now", "")[:WHY_MAX]
             picks_by_slot[slot_id] = {"place_id": place_id, "why": why}
 
-        # ✅ FIX: Track de lugares ya usados para deduplicación
+        #    FIX: Track de lugares ya usados para deduplicación
         used_place_ids = set()
         
         out = []
@@ -189,19 +189,19 @@ class SlotLLM:
                 
                 if chosen is None and options:
                     chosen = options[0]["place"]["place_id"]
-                    logger.warning(f"⚠️ Slot '{slot['slot_id']}' (no LLM pick) forced to reuse place_id")
+                    logger.warning(f"    Slot '{slot['slot_id']}' (no LLM pick) forced to reuse place_id")
                 
                 why = self._simple_why_now(slot, context)
                 out.append({**slot, "selected_place_ids": [chosen] if chosen else [], "why_now": why})
                 continue
 
-            # ✅ FIX: Validar que el lugar elegido por LLM no esté duplicado
+            #    FIX: Validar que el lugar elegido por LLM no esté duplicado
             valid_ids = {o["place"]["place_id"] for o in (slot.get("options") or [])}
             selected_id = p["place_id"]
             
             # Si el LLM eligió un lugar ya usado, buscar alternativa
             if selected_id in used_place_ids:
-                logger.warning(f"⚠️ LLM selected duplicate place_id {selected_id} for slot '{slot['slot_id']}', finding alternative...")
+                logger.warning(f"    LLM selected duplicate place_id {selected_id} for slot '{slot['slot_id']}', finding alternative...")
                 
                 # Buscar el siguiente disponible
                 found_alternative = False
@@ -210,15 +210,15 @@ class SlotLLM:
                     if alt_id in valid_ids and alt_id not in used_place_ids:
                         selected_id = alt_id
                         found_alternative = True
-                        logger.info(f"✅ Found alternative: {alt_id}")
+                        logger.info(f"   Found alternative: {alt_id}")
                         break
                 
                 if not found_alternative:
-                    logger.warning(f"⚠️ No alternatives available for slot '{slot['slot_id']}', reusing {selected_id}")
+                    logger.warning(f"    No alternatives available for slot '{slot['slot_id']}', reusing {selected_id}")
             
             # Validar que el lugar esté en las opciones válidas
             if selected_id not in valid_ids:
-                logger.warning(f"⚠️ LLM selected invalid place_id {selected_id}, using fallback")
+                logger.warning(f"    LLM selected invalid place_id {selected_id}, using fallback")
                 
                 # Fallback: buscar el primer lugar disponible
                 options = slot.get("options") or []
@@ -275,7 +275,7 @@ class SlotLLM:
         key = _cache_key_city_dna(city, language)
         cached = cache.get(key)
         if cached:
-            logger.info(f"✅ City DNA cache HIT: {city}")
+            logger.info(f"   City DNA cache HIT: {city}")
             return cached
 
         # Try LLM
@@ -285,10 +285,10 @@ class SlotLLM:
                 dna = self._llm_build_city_dna(city=city, language=language)
                 parsed = CityDNA(**dna).model_dump()
                 cache.set(key, parsed, CITY_DNA_TTL_SECONDS)
-                logger.info(f"✅ City DNA generated: {len(parsed['food_typicals'])} foods")
+                logger.info(f"   City DNA generated: {len(parsed['food_typicals'])} foods")
                 return parsed
             except Exception as e:
-                logger.warning(f"⚠️ LLM City DNA failed for {city}: {e}")
+                logger.warning(f"    LLM City DNA failed for {city}: {e}")
         
         # Fall back to static
         logger.info(f"📚 Using static fallback for City DNA: {city}")
@@ -377,7 +377,7 @@ class SlotLLM:
                 language=language
             )
         except Exception as e:
-            logger.warning(f"⚠️ LLM guide failed: {e}, using deterministic fallback")
+            logger.warning(f"    LLM guide failed: {e}, using deterministic fallback")
             return self._deterministic_guide(
                 city_dna=city_dna,
                 weather=weather,
@@ -393,15 +393,15 @@ class SlotLLM:
         """
         Create guide without LLM using city_dna.
         
-        ✅ FIX: Asegurar que city_dna tiene datos válidos antes de usar
+           FIX: Asegurar que city_dna tiene datos válidos antes de usar
         """
-        # ✅ FIX: Validar city_dna y proporcionar defaults
+        #    FIX: Validar city_dna y proporcionar defaults
         city_name = city_dna.get('city') or 'la ciudad'
         food_typicals = city_dna.get('food_typicals') or []
         drink_typicals = city_dna.get('drink_typicals') or []
         etiquette = city_dna.get('etiquette') or []
         
-        # ✅ LOG: Diagnosticar qué tenemos
+        #    LOG: Diagnosticar qué tenemos
         logger.info(f"    Building deterministic guide for '{city_name}'")
         logger.info(f"  Food typicals: {len(food_typicals)} items")
         logger.info(f"  Drink typicals: {len(drink_typicals)} items")
@@ -421,7 +421,7 @@ class SlotLLM:
             climate_advice.append("Nieve - abrígate bien y ten cuidado al caminar")
         
         return {
-            "headline": "✔️ Plan adaptado al clima actual",
+            "headline": "    Plan adaptado al clima actual",
             "summary": f"Plan optimizado para {city_name} considerando clima y horarios.",
             "climate_advice": climate_advice,
             "local_typicals": {
