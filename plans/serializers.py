@@ -74,12 +74,30 @@ class PlanListSerializer(serializers.ModelSerializer):
             'start_time_utc', 'end_time_utc',
             'route_quality_score', 'clusters_visited',
             'stop_count',
-            'created_at', 'updated_at'
+            'city_name',  
+            'country',  
+            'country_code', 
+            'created_at',
+            'updated_at'
         ]
         read_only_fields = ['id', 'user', 'created_at', 'updated_at']
 
     def get_stop_count(self, obj):
         return obj.stops.count()
+    def get_city_name(self, obj):
+        """Extract city name from inputs"""
+        inputs = obj.inputs_json or {}
+        return inputs.get('city_name') or inputs.get('city') or 'Unknown'
+    
+    def get_country(self, obj):
+        """Extract country from inputs (from Google Places)"""
+        inputs = obj.inputs_json or {}
+        return inputs.get('country') or 'International'
+    
+    def get_country_code(self, obj):
+        """Extract country code from inputs (for flags)"""
+        inputs = obj.inputs_json or {}
+        return inputs.get('country_code') or ''
 
 
 class PlanDetailSerializer(serializers.ModelSerializer):

@@ -87,18 +87,23 @@ class PlanViewSet(viewsets.ModelViewSet):
         POST /api/plans/generate/ - Generate new plan (V3)
 
         Required:
-          - city_name
-          - lat, lng
+        - city_name
+        - lat, lng
+        - timezone
+        - timing_intent: now | later | plan_ahead
 
-        Optional (V3):
-          - engine_version: v3 (default)
-          - intent: "chill" | "food_tour" | "nightlife" | ...
-          - discovery_mode: local | tourist
-          - constraints: ["indoor_only", "no_alcohol", ...]
-          - use_llm: true/false
-          - llm_model: gpt-4o-mini
-          - timezone: Europe/Berlin
-          - when_selection: now | later_today | tonight | tomorrow
+        Optional:
+        - plan_ahead_hint: tomorrow_morning | tomorrow_afternoon | this_weekend
+        - country: Full country name from Google Places
+        - country_code: ISO code (DE, CO, US, etc.)
+        - intent: "chill" | "food_tour" | "nightlife" | ...
+        - discovery_mode: local | tourist
+        - group_type: solo | couple | friends | family
+        - budget_tier: $ | $$ | $$$ | $$$$
+        - energy_level: low | medium | high
+        - constraints: ["indoor_only", "no_alcohol", ...]
+        - use_llm: true/false
+        - llm_model: gpt-4o-mini
         """
 
         serializer = PlanCreateSerializer(data=request.data)
@@ -117,9 +122,17 @@ class PlanViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        start_dt = data.get("start_time")
-        end_dt = data.get("end_time")
+        # ✅ NEW: Validate timing_intent
+        timing_intent = request.data.get("timing_intent")
+        if not timing_intent:
+            return Response(
+                {"error": "timing_intent required (now, later, or plan_ahead)"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
+        # ✅ NEW: Extract timing data
+        plan_ahead_hint = request.data.get("plan_ahead_hint", "")
+        
         # Build V3 inputs_json
         constraints = list(data.get("constraints") or [])
 
@@ -139,32 +152,34 @@ class PlanViewSet(viewsets.ModelViewSet):
             if "outdoor_only" not in constraints:
                 constraints.append("outdoor_only")
 
-        duration_hours = 4.0
-        if start_dt and end_dt:
-            try:
-                duration_hours = (end_dt - start_dt).total_seconds() / 3600.0
-            except Exception:
-                duration_hours = 4.0
-
         inputs_json = {
             # ========== V3 CORE ==========
             "engine_version": data.get("engine_version", "v3"),
-            "city_name": data.get("city_name"),
-            "timezone": data.get("timezone", "Europe/Berlin"),
-            "when_selection": data.get("when_selection", "now"),
-            "intent": data.get("intent", "chill"),
-            "discovery_mode": data.get("discovery_mode", "local"),
+            "city_name": data.get("city_name") or request.data.get("city_name"),
+            "timezone": data.get("timezone") or request.data.get("timezone", "Europe/Berlin"),
+            
+            # ✅ NEW: Updated timing model
+            "timing_intent": timing_intent,
+            "plan_ahead_hint": plan_ahead_hint,
+            
+            # ✅ NEW: Country data from Google Places
+            "country": request.data.get("country", ""),
+            "country_code": request.data.get("country_code", ""),
+            
+            "intent": data.get("intent") or request.data.get("intent", "chill"),
+            "discovery_mode": data.get("discovery_mode") or request.data.get("discovery_mode", "local"),
+            "group_type": request.data.get("group_type"),
+            "budget_tier": request.data.get("budget_tier", "$$"),
+            "energy_level": request.data.get("energy_level", "medium"),
             "constraints": constraints,
             "use_llm": bool(data.get("use_llm", False)),
             "llm_model": data.get("llm_model", "gpt-4o-mini"),
             "companions": data.get("companions"),
             "current_location": {"lat": float(lat), "lng": float(lng)},
-            "start_time": start_dt.isoformat() if start_dt else None,
-            "end_time": end_dt.isoformat() if end_dt else None,
-            "duration_hours": duration_hours,
             "weather": data.get("weather"),  # Manual override for QA
 
-            # ========== V2 BACK-COMPAT ==========
+            # ========== DEPRECATED (for back-compat) ==========
+            "when_selection": request.data.get("when_selection", "now"),  # Old model
             "mode": data.get("mode", "travel"),
             "mood": data.get("mood", "curious"),
             "energy": data.get("energy", 2),
@@ -178,12 +193,18 @@ class PlanViewSet(viewsets.ModelViewSet):
             "budget_feeling": data.get("budget_feeling"),
         }
 
+        # ✅ Calculate start/end times from timing_intent in backend
+        # This should be done by your timing calculation logic
+        # For now, we'll pass None and let the backend calculate
+        start_dt = None
+        end_dt = None
+        
         # Create Plan
         plan = Plan.objects.create(
             user=request.user,
             status="building",
-            start_time_utc=start_dt,
-            end_time_utc=end_dt,
+            start_time_utc=start_dt,  # Will be calculated by backend
+            end_time_utc=end_dt,      # Will be calculated by backend
             inputs_json=inputs_json,
             theme=data.get("theme"),
             budget_feeling=data.get("budget_feeling") or data.get("budget"),
@@ -192,20 +213,21 @@ class PlanViewSet(viewsets.ModelViewSet):
         # Trigger async generation
         generate_plan_task.delay(str(plan.id))
 
+        # ✅ Response with timing context
+        city_name = inputs_json.get('city_name', 'Unknown')
+        timezone_str = inputs_json.get('timezone', 'UTC')
+        
         return Response(
             {
                 "plan_id": str(plan.id),
                 "status": "building",
-                "planned_for": {
-                    "city": inputs_json['city_name'],
-                    "timezone": inputs_json['timezone'],
-                    "start": start_dt.isoformat(),  
-                    "end": end_dt.isoformat(),     
-                    "start_display": start_dt.strftime("%I:%M %p"),  
-                    "end_display": end_dt.strftime("%I:%M %p"),      
+                "context": {
+                    "city": city_name,
+                    "timezone": timezone_str,
+                    "timing_intent": timing_intent,
+                    "plan_ahead_hint": plan_ahead_hint if timing_intent == "plan_ahead" else None,
                 },
-                "message": f"Plan generation started for {inputs_json['city_name']}",
-
+                "message": f"Plan generation started for {city_name}",
             },
             status=status.HTTP_202_ACCEPTED,
         )
