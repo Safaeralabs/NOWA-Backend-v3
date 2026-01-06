@@ -379,4 +379,3 @@ if DEBUG:
     LOGGING['loggers']['plans']['level'] = 'DEBUG'
     LOGGING['loggers']['celery']['level'] = 'DEBUG'
 
-USE_REDIS_IN_DEV=True
