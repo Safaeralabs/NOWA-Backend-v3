@@ -33,10 +33,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # ==========================================
 SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'dev-secret-key-CHANGE-IN-PRODUCTION-xyz123')
 
-DEBUG = os.environ.get('DEBUG', 'False') == 'False'
+DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
 ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
-
+if DEBUG:
+    print("ESTAS EN DEBUG")
+else:
+    print(DEBUG)
 if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     USE_X_FORWARDED_HOST = True
