@@ -109,7 +109,7 @@ class PlanViewSet(viewsets.ModelViewSet):
         serializer = PlanCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-
+        
         # V3 requires coordinates
         lat = data.get("lat")
         lng = data.get("lng")
@@ -118,6 +118,51 @@ class PlanViewSet(viewsets.ModelViewSet):
                 {
                     "error": "lat/lng required",
                     "hint": "V3 needs current_location coordinates to query Google Places.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        start_dt = data.get("start_time")
+        
+        end_dt = data.get("end_time")
+        
+        if not start_dt:
+            # Fallback: calculate now in user's timezone
+            import pytz
+            timezone_str = data.get('timezone', 'Europe/Berlin')
+            try:
+                tz = pytz.timezone(timezone_str)
+            except:
+                tz = pytz.UTC
+            
+            from datetime import datetime, timedelta
+            start_dt = datetime.now(tz)
+            
+            # Calculate end_dt if also missing
+            if not end_dt:
+                mode = data.get('mode', 'today')
+                if mode == 'today':
+                    end_dt = start_dt + timedelta(hours=4)
+                elif mode == 'date':
+                    end_dt = start_dt + timedelta(hours=5)
+                else:
+                    end_dt = start_dt + timedelta(hours=8)
+        
+        # Additional safety check
+        if not end_dt:
+            end_dt = start_dt + timedelta(hours=4)
+        
+        # ✅ CRITICAL: Validate both are present
+        if not start_dt or not end_dt:
+    
+            return Response(
+                {
+                    "error": "start_time and end_time calculation failed",
+                    "debug": {
+                        "start_time": str(start_dt) if start_dt else None,
+                        "end_time": str(end_dt) if end_dt else None,
+                        "when_selection": data.get('when_selection'),
+                        "timezone": data.get('timezone'),
+                    }
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -196,10 +241,10 @@ class PlanViewSet(viewsets.ModelViewSet):
         # ✅ Calculate start/end times from timing_intent in backend
         # This should be done by your timing calculation logic
         # For now, we'll pass None and let the backend calculate
-        start_dt = None
-        end_dt = None
+        #start_dt = None
+        #end_dt = None
         
-        # Create Plan
+       
         plan = Plan.objects.create(
             user=request.user,
             status="building",
@@ -209,8 +254,10 @@ class PlanViewSet(viewsets.ModelViewSet):
             theme=data.get("theme"),
             budget_feeling=data.get("budget_feeling") or data.get("budget"),
         )
-
+       
+       
         # Trigger async generation
+        
         generate_plan_task.delay(str(plan.id))
 
         # ✅ Response with timing context
