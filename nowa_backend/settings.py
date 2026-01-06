@@ -36,7 +36,10 @@ SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'dev-secret-key-CHANGE-IN-PRODU
 DEBUG = os.environ.get('DEBUG', 'False') == 'False'
 print(DEBUG)
 ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
-
+if DEBUG:
+    print("ESTAS EN DEBUG")
+else:
+    print(DEBUG)
 if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     USE_X_FORWARDED_HOST = True
@@ -376,4 +379,3 @@ if DEBUG:
     LOGGING['loggers']['plans']['level'] = 'DEBUG'
     LOGGING['loggers']['celery']['level'] = 'DEBUG'
 
-USE_REDIS_IN_DEV=True
