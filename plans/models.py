@@ -11,12 +11,7 @@ class Profile(models.Model):
 
 
 class Plan(models.Model):
-    MODE_CHOICES = [
-        ('today', 'Today'),        # READY NUEVO
-        ('travel', 'Travel'),      # READY Actualizado
-        ('date', 'Date'),          # READY Actualizado
-        # Eliminados: friends, solo, occasion
-    ]
+    
     STATUS_CHOICES = [
         ('draft', 'Draft'),
         ('building', 'Building'),
@@ -102,6 +97,23 @@ class Plan(models.Model):
         default=0,
         help_text="Number of LLM attempts (for debugging)"
     )
+    plan_timezone = models.CharField(
+        max_length=50,
+        default='Europe/Berlin',
+        help_text="Timezone of the plan (city timezone)"
+    )
+    
+    timing_intent = models.CharField(
+        max_length=20,
+        choices=[
+            ('now', 'Now'),
+            ('later', 'Later'),
+            ('plan_ahead', 'Plan Ahead'),
+        ],
+        default='now',
+        help_text="User's timing preference"
+    )
+
 
     class Meta:
         ordering = ['-created_at']

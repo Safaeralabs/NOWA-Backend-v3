@@ -196,10 +196,16 @@ class PlanViewSet(viewsets.ModelViewSet):
             {
                 "plan_id": str(plan.id),
                 "status": "building",
-                "engine_version": inputs_json["engine_version"],
-                "intent": inputs_json["intent"],
-                "when": inputs_json["when_selection"],
-                "message": "Plan generation started. Poll /api/plans/{id}/ for status.",
+                "planned_for": {
+                    "city": inputs_json['city_name'],
+                    "timezone": inputs_json['timezone'],
+                    "start": start_dt.isoformat(),  
+                    "end": end_dt.isoformat(),     
+                    "start_display": start_dt.strftime("%I:%M %p"),  
+                    "end_display": end_dt.strftime("%I:%M %p"),      
+                },
+                "message": f"Plan generation started for {inputs_json['city_name']}",
+
             },
             status=status.HTTP_202_ACCEPTED,
         )
